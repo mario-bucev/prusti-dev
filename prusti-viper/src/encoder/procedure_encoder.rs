@@ -4105,12 +4105,13 @@ impl<'p, 'v: 'p, 'r: 'v, 'a: 'r, 'tcx: 'a> ProcedureEncoder<'p, 'v, 'r, 'a, 'tcx
         len: u64,
         encoded_lhs: vir::Expr,
         ty: ty::Ty<'tcx>,
-        location: mir::Location,
+        // TODO: not using location seems odd
+        _location: mir::Location,
     ) -> Vec<vir::Stmt> {
         trace!("[enter] encode_assign_repeat(lhs={}, rhs=[{:?}; {}])", encoded_lhs, operand, len);
-        let encoded_operand = self.mir_encoder.encode_operand_expr(operand);
         // FIXME: This will cause a panic for struct/adt operand
         //  They require a different encoding
+        let encoded_operand = self.mir_encoder.encode_operand_expr(operand);
         let val_array = self.encoder.encode_value_field(ty);
         // lhs.val_array
         let encoded_lhs_val_array = encoded_lhs.clone().field(val_array.clone());
@@ -4283,6 +4284,16 @@ impl<'p, 'v: 'p, 'r: 'v, 'a: 'r, 'tcx: 'a> ProcedureEncoder<'p, 'v, 'r, 'a, 'tcx
         stmts
     }
 
+    fn encode_deep_copy_array(
+        &mut self,
+        src: vir::Expr,
+        dst: vir::Expr,
+        arr_ty: ty::Ty<'tcx>,
+    ) -> Vec<vir::Stmt> {
+        // Body of this function is the same as for copy_adt, so we just reuse the function...
+        self.encode_deep_copy_adt(src, dst, arr_ty)
+    }
+
     fn encode_deep_copy_tuple(
         &mut self,
         src: vir::Expr,
@@ -4333,7 +4344,10 @@ impl<'p, 'v: 'p, 'r: 'v, 'a: 'r, 'tcx: 'a> ProcedureEncoder<'p, 'v, 'r, 'a, 'tcx
                     src, dst, self_ty, vir::Position::default());
                 stmts.push(vir::Stmt::Inhale(eq, vir::FoldingBehaviour::Stmt));
                 stmts
-            },
+            }
+            ty::TypeVariants::TyArray(..) => {
+                self.encode_deep_copy_array(src, dst, self_ty)
+            }
 
             ref x => unimplemented!("{:?}", x),
         };

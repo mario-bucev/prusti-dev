@@ -521,6 +521,59 @@ impl<'v, 'r, 'a, 'tcx> Encoder<'v, 'r, 'a, 'tcx> {
         vir::ExprIterator::conjoin(&mut conjuncts.into_iter())
     }
 
+    fn encode_memory_eq_array(
+        &self,
+        first: vir::Expr,
+        second: vir::Expr,
+        arr_ty: ty::Ty<'tcx>,
+    ) -> vir::Expr {
+        let inner_ty = match arr_ty.sty {
+            ty::TypeVariants::TyArray(inner_ty, _) => inner_ty,
+            ref x => panic!("Got {:?} but expected a TyArray", x),
+        };
+        let val_ref = self.encode_dereference_field(inner_ty);
+        let val_array = self.encode_value_field(arr_ty);
+        let idx_local = vir::LocalVar::new("i", vir::Type::Int);
+        let idx = vir::Expr::local(idx_local.clone());
+
+        // first.val_array
+        let first_val_array = first.clone().field(val_array.clone());
+        let second_val_array = second.clone().field(val_array.clone());
+
+        let same_len = vir::Expr::eq_cmp(
+            vir::Expr::seq_len(first_val_array.clone()),
+            vir::Expr::seq_len(second_val_array.clone()),
+        );
+        // 0 <= i < |first.val_array|
+        let idx_bounds = vir::Expr::and(
+            vir::Expr::le_cmp(
+                vir::Expr::Const(vir::Const::Int(0), vir::Position::default()),
+                idx.clone()
+            ),
+            vir::Expr::lt_cmp(idx.clone(), vir::Expr::seq_len(first_val_array.clone()))
+        );
+
+        // first.val_array[i].val_ref
+        let first_val_array_elem = vir::Expr::seq_index(first_val_array.clone(), idx.clone())
+            .field(val_ref.clone());
+        let second_val_array_elem = vir::Expr::seq_index(second_val_array.clone(), idx.clone())
+            .field(val_ref);
+
+        let elem_mem_eq = self.encode_memory_eq_func_app(
+            first_val_array_elem, second_val_array_elem, inner_ty, vir::Position::default()
+        );
+        let forall_elem_mem_eq = vir::Expr::forall(
+            vec![idx_local],
+            vec![vir::Trigger::new(vec![
+                vir::Expr::seq_index(first_val_array.clone(), idx.clone()),
+                vir::Expr::seq_index(second_val_array.clone(), idx.clone())
+            ])],
+            vir::Expr::implies(idx_bounds, elem_mem_eq)
+        );
+
+        vir::Expr::and(same_len, forall_elem_mem_eq)
+    }
+
     fn encode_memory_eq_func_body(
         &self,
         first: vir::Expr,
@@ -547,7 +600,10 @@ impl<'v, 'r, 'a, 'tcx> Encoder<'v, 'r, 'a, 'tcx> {
             }
             ty::TypeVariants::TyParam(_) => {
                 None
-            },
+            }
+            ty::TypeVariants::TyArray(..) => {
+                Some(self.encode_memory_eq_array(first.clone(), second.clone(), self_ty))
+            }
 
             ref x => unimplemented!("{:?}", x),
         };

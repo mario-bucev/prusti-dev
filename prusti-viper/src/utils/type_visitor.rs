@@ -9,7 +9,7 @@ use rustc::ty::subst::Substs;
 use rustc::ty::TypeVariants::*;
 use rustc::ty::{
     AdtDef, FieldDef, ParamTy, ProjectionTy, Region, Slice, Ty, TyCtxt, TypeFlags, TypeVariants,
-    VariantDef,
+    VariantDef, Const
 };
 use syntax::ast::{IntTy, UintTy};
 
@@ -58,6 +58,9 @@ pub trait TypeVisitor<'a, 'tcx>: Sized {
             TyProjection(data) => {
                 self.visit_projection(data);
             }
+            TyArray(inner_ty, len) => {
+                self.visit_array(inner_ty, len);
+            }
             ref x => {
                 unimplemented!("{:?}", x);
             }
@@ -93,6 +96,11 @@ pub trait TypeVisitor<'a, 'tcx>: Sized {
     fn visit_field(&mut self, index: usize, field: &FieldDef, substs: &'tcx Substs<'tcx>) {
         trace!("visit_field({}, {:?})", index, field);
         walk_field(self, field, substs);
+    }
+
+    fn visit_array(&mut self, inner_ty: Ty<'tcx>, len: &'tcx Const<'tcx>) {
+        trace!("visit_array({:?}, {:?})", inner_ty, len);
+        walk_array(self, inner_ty, len);
     }
 
     fn visit_ref(&mut self, region: Region<'tcx>, ty: Ty<'tcx>, mutability: Mutability) {
@@ -144,6 +152,14 @@ pub fn walk_field<'a, 'tcx, V: TypeVisitor<'a, 'tcx>>(
 ) {
     let ty = field.ty(visitor.tcx(), substs);
     visitor.visit_ty(ty);
+}
+
+pub fn walk_array<'a, 'tcx, V: TypeVisitor<'a, 'tcx>>(
+    visitor: &mut V,
+    inner_ty: Ty<'tcx>,
+    _len: &'tcx Const<'tcx>,
+) {
+    visitor.visit_ty(inner_ty);
 }
 
 pub fn walk_ref<'a, 'tcx, V: TypeVisitor<'a, 'tcx>>(
