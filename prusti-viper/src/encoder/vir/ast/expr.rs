@@ -1426,8 +1426,16 @@ impl Expr {
             }
         }
         let mut result = HashSet::new();
+        if lvs.is_empty() {
+            // Just to avoid unnecessary traversing
+            return result;
+        }
         inner(self, lvs, &mut HashSet::new(), &mut result);
         result
+    }
+
+    pub fn contains_any_var(&self, lvs: &HashSet<LocalVar>) -> bool {
+        !lvs.is_empty() && !self.get_local_vars(lvs).is_empty()
     }
 
     /// Extract the sequence and the indexing of the expression
@@ -2081,6 +2089,15 @@ impl QuantifiedResourceAccess {
         ).is_success()
     }
 
+    pub fn has_proper_prefix(&self, other: &QuantifiedResourceAccess) -> bool {
+        if self.vars.len() != other.vars.len() {
+            // We assume that all vars are used...
+            return false;
+        }
+        // TODO: do this correctly by unifying the bounded vars
+        self.cond == other.cond && self.resource.get_place().has_proper_prefix(other.resource.get_place())
+    }
+
     pub fn to_forall_expression(&self) -> Expr {
         let body = Expr::BinOp(
             BinOpKind::Implies,
@@ -2107,6 +2124,7 @@ impl QuantifiedResourceAccess {
             resource: self.resource.update_perm_amount(new_perm)
         }
     }
+
     // TODO: misleading name
     pub fn map_place<F>(self, f: F) -> Self
         where F: Fn(Expr) -> Expr

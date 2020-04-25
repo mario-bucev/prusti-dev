@@ -38,6 +38,21 @@ pub enum Action {
     /// Note that this problem shouldn't arise for `read` accesses, but we still
     /// conservatively temporarily unfold `read` (instantiated) predicate accesses.
     TemporaryUnfold(String, Vec<vir::Expr>, PermAmount, vir::MaybeEnumVariantIndex),
+    /// An `unfolding` expression happening inside a `forall` expression.
+    /// For instance, suppose that we have the following quantified predicate:
+    /// ```forall i: Int :: { foo.val_array[i] } 0 <= i && i < |foo.val_array|
+    ///     ==> acc(isize(foo.val_array[i].val_ref))```
+    /// And that we have the following expression:
+    /// ```forall i: Int :: { foo.val_array[i] } 0 <= i && i < |foo.val_array|
+    ///     ==> foo.val_array[i].val_ref.val_int == 42```
+    /// We would like to unfold the predicate `isize(foo.val_array[i].val_ref)` inside the forall
+    /// If we use `Action::Unfold` or `Action::TemporaryUnfold`, and convert them to VIR expression,
+    /// we would get the following wrong expression:
+    /// ```unfolding acc(isize(foo.val_array[i].val_ref)) in forall ...```
+    /// For such cases, one should instead use this variant that will correctly translate the unfolding:
+    /// ```forall i: Int :: { foo.val_array[i] } 0 <= i && i < |foo.val_array|
+    ///     ==> unfolding acc(isize(foo.val_array[i].val_ref)) in foo.val_array[i].val_ref.val_int == 42```
+    QuantifiedUnfold(String, vir::Expr, PermAmount, vir::MaybeEnumVariantIndex),
 }
 
 impl Action {
@@ -60,7 +75,9 @@ impl Action {
                 vir::Stmt::Assert(assertion.clone(), FoldingBehaviour::Expr, Position::default()),
             Action::TemporaryUnfold(..) =>
                 panic!("A temporary unfold has no equivalent in vir::Stmt\n\
-                `actions_to_stmts` should be used instead")
+                `actions_to_stmts` should be used instead"),
+            Action::QuantifiedUnfold(..) =>
+                panic!("A quantified unfold has no equivalent in vir::Stmt"),
         }
     }
 
@@ -79,7 +96,54 @@ impl Action {
 
             Action::Drop(..) => inner_expr,
 
+            Action::QuantifiedUnfold(ref pred, ref arg, perm, ref variant) => match inner_expr.clone() {
+                vir::Expr::ForAll(vars, triggers, box body, pos) => {
+                    assert!(arg.contains_any_var(&vars.iter().cloned().collect()));
+
+                    // We must "push" the unfolding after any possible implications, otherwise
+                    // we could end up with the following erroneous expression:
+                    // `forall i: Int :: { foo.val_array[i] } unfolding acc(isize(foo.val_array[i].val_ref))
+                    //  in 0 <= i && i < |foo.val_array| ==> foo.val_array[i].val_ref.val_int == 42`
+                    // The unfolding should happen after `0 <= i && i < |foo.val_array|`
+                    let new_body = Self::pushed_unfolding(
+                        &vars,
+                        pred.clone(),
+                        arg.clone(),
+                        body,
+                        *perm,
+                        variant.clone()
+                    );
+                    vir::Expr::ForAll(vars, triggers, box new_body, pos)
+                }
+                other => panic!("to_expr of a {} and an inner_expr {} which is not a forall", self, other),
+            }
+            // TODO: assertion ==> inner_expr can lead to ill-formed expression, maybe panic instead...
             Action::Assertion(_) => inner_expr, // The assertion has already been taken care of.
+        }
+    }
+
+    fn pushed_unfolding(
+        vars: &Vec<vir::LocalVar>,
+        pred_name: String,
+        arg: vir::Expr,
+        body: vir::Expr,
+        perm: PermAmount,
+        variant: vir::MaybeEnumVariantIndex,
+    ) -> vir::Expr {
+        let vars = vars.iter().cloned().collect();
+        // FIXME This should do for the moment, but may be insufficient for the future.
+        //  We should instead "push" the unfolding as long as we do not see any boolean expression
+        //  involving `vars`
+        match body {
+            vir::Expr::BinOp(vir::BinOpKind::Implies, ref lhs, ref rhs, ref pos) if lhs.contains_any_var(&vars) => {
+                vir::Expr::BinOp(
+                    vir::BinOpKind::Implies,
+                    lhs.clone(),
+                    box vir::Expr::unfolding(pred_name, vec![arg], *rhs.clone(), perm, variant),
+                    pos.clone()
+                )
+            }
+            _ => vir::Expr::unfolding(pred_name, vec![arg], body, perm, variant),
         }
     }
 }
@@ -118,7 +182,13 @@ impl fmt::Display for Action {
                     f, "temp-{}",
                     vir::Stmt::Unfold(pred_name.clone(), args.clone(), *perm, variant.clone())
                         .to_string()
-                )
+                ),
+            Action::QuantifiedUnfold(ref pred_name, ref arg, perm, ref variant) =>
+                write!(
+                    f, "quant-{}",
+                    vir::Stmt::Unfold(pred_name.clone(), vec![arg.clone()], *perm, variant.clone())
+                        .to_string()
+                ),
         }
     }
 }

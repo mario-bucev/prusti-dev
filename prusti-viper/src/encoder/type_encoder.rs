@@ -15,6 +15,7 @@ use encoder::Encoder;
 use prusti_interface::config;
 use prusti_interface::specifications::*;
 use rustc::middle::const_val::ConstVal;
+use rustc::mir;
 use rustc::ty;
 use rustc::ty::layout;
 use rustc::ty::layout::IntegerExt;
@@ -432,7 +433,17 @@ impl<'p, 'v, 'r: 'v, 'a: 'r, 'tcx: 'a> TypeEncoder<'p, 'v, 'r, 'a, 'tcx> {
             ty::TypeVariants::TyArray(elem_ty, size) => {
                 let scalar_size = match size.val {
                     ConstVal::Value(ref value) => value.to_scalar().unwrap(),
-                    x => unimplemented!("{:?}", x),
+                    ConstVal::Unevaluated(def_id, _param_env) => {
+                        // Found here:
+                        // https://rustc-dev-guide.rust-lang.org/miri.html#miri
+                        let gid = mir::interpret::GlobalId {
+                            promoted: None,
+                            instance: ty::Instance::mono(self.encoder.env().tcx(), def_id),
+                        };
+                        self.encoder.env().tcx()
+                            .const_eval(self.encoder.env().tcx().param_env(def_id).and(gid))
+                            .unwrap().to_scalar().unwrap()
+                    }
                 };
                 format!(
                     "array${}${}",

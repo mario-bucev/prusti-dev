@@ -211,7 +211,8 @@ impl<'v, 'r, 'a, 'tcx> Verifier<'v, 'r, 'a, 'tcx> {
             let builtin_methods = self.encoder.get_used_builtin_methods();
             let mut methods = self.encoder.get_used_viper_methods();
             let mut functions = self.encoder.get_used_viper_functions();
-            if config::simplify_encoding() {
+            // TODO: Fix folding optimization so that it does not pull out unfolding from forall on which it depends
+            if false && config::simplify_encoding() {
                 let (new_methods, new_functions) = optimisations::functions::inline_constant_functions(
                     methods, functions);
                 methods = new_methods

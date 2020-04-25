@@ -1232,7 +1232,7 @@ impl<'b, 'a: 'b> ExprFolder for ExprReplacer<'b, 'a> {
             new_base.reconstruct_place(components)
         };
 
-        debug!("[exit] fold_unfolding = {}", res);
+        debug!("[exit] fold_field = {}", res);
         res
     }
 
@@ -1398,6 +1398,31 @@ impl<'b, 'a: 'b> ExprFolder for ExprReplacer<'b, 'a> {
 
         debug!("[exit] fold_labelled_old = {}", res);
         res
+    }
+
+    // FIXME: We should explore the body of the forall in a way to add unfoldings to expressions that do not depend on the forall vars
+    fn fold_forall(
+        &mut self,
+        x: Vec<vir::LocalVar>,
+        y: Vec<vir::Trigger>,
+        z: Box<vir::Expr>,
+        p: vir::Position,
+    ) -> vir::Expr {
+        debug!(
+            "[enter] fold forall {} {}",
+            x.iter().map(|lv| format!("{}", lv)).collect::<Vec<_>>().join(", "),
+            z
+        );
+        // If we do not override the fold_forall, the default fold will break the body into
+        // pieces without considering the forall vars. This can lead to some issues w.r.t. permissions
+        // E.g. if we have `forall i :: 0 <= i < 42 ==> arr[i].val_ref.val_int == foo.val_int`,
+        // one of the expression that will be passed `to get_required_permissions`
+        // will be `arr[i].val_ref.val_int`, which doesn't make sense.
+        // If we instead return the forall as-is, `get_required_permissions` will return
+        // `forall i :: 0 <= i < 42 ==> acc(arr[i].val_ref.val_int)` (QuantifiedResourceAccess)
+        // and `acc(foo.val_int)`, which is the expected behaviour.
+        // However, as noted in the fixme above, we should do a bit more work that return the forall as-is...
+        vir::Expr::ForAll(x, y, z, p)
     }
 
     fn fold(&mut self, expr: vir::Expr) -> vir::Expr {

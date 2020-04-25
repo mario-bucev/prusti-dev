@@ -72,21 +72,10 @@ impl<'p, 'v: 'p, 'r: 'v, 'a: 'r, 'tcx: 'a> MirEncoder<'p, 'v, 'r, 'a, 'tcx> {
     pub fn encode_local(&self, local: mir::Local) -> vir::LocalVar {
         let var_name = self.encode_local_var_name(local);
         let local_ty = self.get_local_ty(local);
-        match local_ty.sty {
-            ty::TypeVariants::TyArray(inner, _)
-            | ty::TypeVariants::TySlice(inner) => {
-                let type_name = self
-                    .encoder
-                    .encode_type_predicate_use(inner);
-                vir::LocalVar::new(var_name, vir::Type::TypedSeq(type_name))
-            }
-            _ => {
-                let type_name = self
-                    .encoder
-                    .encode_type_predicate_use(local_ty);
-                vir::LocalVar::new(var_name, vir::Type::TypedRef(type_name))
-            }
-        }
+        let type_name = self
+            .encoder
+            .encode_type_predicate_use(local_ty);
+        vir::LocalVar::new(var_name, vir::Type::TypedRef(type_name))
     }
 
     /// Returns

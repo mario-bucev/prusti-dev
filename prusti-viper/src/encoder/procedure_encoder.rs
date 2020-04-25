@@ -778,6 +778,9 @@ impl<'p, 'v: 'p, 'r: 'v, 'a: 'r, 'tcx: 'a> ProcedureEncoder<'p, 'v, 'r, 'a, 'tcx
                     &mir::Rvalue::Len(ref place) => {
                         self.encode_assign_len(place, encoded_lhs, ty, location)
                     }
+                    &mir::Rvalue::Repeat(ref operand, len) => {
+                        self.encode_assign_repeat(operand, len, encoded_lhs, ty, location)
+                    }
                     ref rhs => {
                         unimplemented!("encoding of '{:?}'", rhs);
                     }
@@ -3669,7 +3672,7 @@ impl<'p, 'v: 'p, 'r: 'v, 'a: 'r, 'tcx: 'a> ProcedureEncoder<'p, 'v, 'r, 'a, 'tcx
                                     box forall_body,
                                     vir::Position::default()
                                 );
-                                let inhale = vir::Stmt::Inhale(forall, vir::FoldingBehaviour::None);
+                                let inhale = vir::Stmt::Inhale(forall, vir::FoldingBehaviour::Expr);
                                 let fold_struct_pred = vir::Stmt::Fold(
                                     lhs.typed_ref_name().unwrap(),
                                     vec![lhs.clone()],
@@ -4093,6 +4096,54 @@ impl<'p, 'v: 'p, 'r: 'v, 'a: 'r, 'tcx: 'a> ProcedureEncoder<'p, 'v, 'r, 'a, 'tcx
         trace!("[enter] encode_assign_len(place={:?})", seq_place);
         let (encoded_seq, _) = self.encode_derefs(seq_place);
         self.encode_copy_value_assign(encoded_lhs, vir::Expr::seq_len(encoded_seq), ty, location)
+    }
+
+    // [operand; len] for arrays
+    fn encode_assign_repeat(
+        &mut self,
+        operand: &mir::Operand<'tcx>,
+        len: u64,
+        encoded_lhs: vir::Expr,
+        ty: ty::Ty<'tcx>,
+        location: mir::Location,
+    ) -> Vec<vir::Stmt> {
+        trace!("[enter] encode_assign_repeat(lhs={}, rhs=[{:?}; {}])", encoded_lhs, operand, len);
+        let encoded_operand = self.mir_encoder.encode_operand_expr(operand);
+        // FIXME: This will cause a panic for struct/adt operand
+        //  They require a different encoding
+        let val_array = self.encoder.encode_value_field(ty);
+        // lhs.val_array
+        let encoded_lhs_val_array = encoded_lhs.clone().field(val_array.clone());
+
+        let idx_local = vir::LocalVar::new("i", vir::Type::Int);
+        let idx = vir::Expr::local(idx_local.clone());
+        // lhs.val_array[i]
+        let elems = vir::Expr::seq_index(encoded_lhs_val_array.clone(), idx.clone());
+        let operand_ty = self.mir_encoder.get_operand_ty(operand);
+        // FIXME: This will cause a panic for struct/adt operand too, for the same reasons
+        // lhs.val_array[i].val_ref.val_x (e.g. x = int for integer types)
+        let elems_field = elems.clone()
+            .field(self.encoder.encode_dereference_field(operand_ty))
+            .field(self.encoder.encode_value_field(operand_ty));
+
+        // 0 <= i < |lhs.val_array|
+        let idx_bounds = vir::Expr::and(
+            vir::Expr::le_cmp(
+                vir::Expr::Const(vir::Const::Int(0), vir::Position::default()),
+                idx.clone()
+            ),
+            vir::Expr::lt_cmp(idx.clone(), vir::Expr::seq_len(encoded_lhs_val_array.clone()))
+        );
+        let eq = vir::Expr::eq_cmp(elems_field, encoded_operand);
+        let forall = vir::Expr::forall(
+            vec![idx_local],
+            vec![vir::Trigger::new(vec![elems.clone()])],
+            vir::Expr::implies(idx_bounds, eq)
+        );
+
+        let mut stmts = self.encode_havoc_and_allocation(&encoded_lhs);
+        stmts.push(vir::Stmt::Inhale(forall, vir::FoldingBehaviour::Expr));
+        stmts
     }
 
     pub fn get_auxiliar_local_var(&mut self, suffix: &str, vir_type: vir::Type) -> vir::LocalVar {

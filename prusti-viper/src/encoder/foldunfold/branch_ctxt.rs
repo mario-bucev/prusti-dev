@@ -130,6 +130,91 @@ impl<'a> BranchCtxt<'a> {
         }
     }
 
+    /// Like `unfold` but deals with quantified predicate access.
+    fn unfold_quantified(
+        &mut self,
+        quant_pred: &vir::QuantifiedResourceAccess,
+        perm_amount: PermAmount,
+        variant: vir::MaybeEnumVariantIndex,
+    ) -> Action {
+        debug!("We want to unfold {} with {}", quant_pred, perm_amount);
+        assert!(quant_pred.resource.is_pred(), "Quantified resource access must be a predicate");
+        assert!(
+            self.state.contains_quantified(quant_pred),
+            "missing quant_pred({}) in {}",
+            quant_pred,
+            self.state
+        );
+        assert!(
+            perm_amount.is_valid_for_specs(),
+            "Invalid permission amount."
+        );
+
+        let predicate_name = quant_pred.resource.get_place().typed_ref_name().unwrap();
+        let predicate = self.predicates.get(&predicate_name).unwrap();
+
+        let pred_self_place: vir::Expr = predicate.self_place();
+        let quantified_places_in_pred = predicate
+            .get_permissions_with_variant(&variant)
+            .into_iter()
+            .map(|perm| {
+                let place = perm.map_place(|p| p.replace_place(&pred_self_place, quant_pred.resource.get_place()))
+                    .update_perm_amount(perm_amount);
+                let resource = match place {
+                    Perm::Acc(place, perm_amount) =>
+                        vir::PlainResourceAccess::field(place, perm_amount),
+                    Perm::Pred(place, perm_amount) =>
+                        vir::PlainResourceAccess::predicate(place, perm_amount).unwrap(),
+                    Perm::Quantified(_) => unimplemented!()
+                };
+                vir::QuantifiedResourceAccess {
+                    vars: quant_pred.vars.clone(),
+                    triggers: quant_pred.triggers.clone(),
+                    cond: quant_pred.cond.clone(),
+                    resource
+                }
+            });
+
+        trace!(
+            "Acc state before unfold: {{\n{}\n}}",
+            self.state.display_acc()
+        );
+        trace!(
+            "Pred state before unfold: {{\n{}\n}}",
+            self.state.display_pred()
+        );
+        trace!(
+            "Quant state before unfold: {{\n{}\n}}",
+            self.state.display_quant()
+        );
+
+        // Simulate unfolding of `quant_pred`
+        self.state.remove_quant(quant_pred);
+        self.state.insert_all_quant(quantified_places_in_pred);
+
+        debug!("We unfolded {}", quant_pred.resource.get_place());
+
+        trace!(
+            "Acc state after unfold: {{\n{}\n}}",
+            self.state.display_acc()
+        );
+        trace!(
+            "Pred state after unfold: {{\n{}\n}}",
+            self.state.display_pred()
+        );
+        trace!(
+            "Quant state after unfold: {{\n{}\n}}",
+            self.state.display_quant()
+        );
+
+        Action::QuantifiedUnfold(
+            predicate_name.clone(),
+            quant_pred.resource.get_place().clone().into(),
+            perm_amount,
+            variant,
+        )
+    }
+
     /// left is self, right is other
     pub fn join(&mut self, mut other: BranchCtxt) -> (Vec<Action>, Vec<Action>) {
         // All field accs that do not come from a quantified field accesses
@@ -541,9 +626,18 @@ impl<'a> BranchCtxt<'a> {
     /// ``in_join`` – are we currently trying to join branches?
     fn obtain(&mut self, req: &Perm, in_join: bool) -> ObtainResult {
         trace!("[enter] obtain(req={})", req);
+        let quant_vars = match req {
+            Perm::Quantified(quant) => quant.vars.iter().cloned().collect(),
+            _ => HashSet::new()
+        };
         // First, obtain permissions of all prefixes
-        let prefixes = req.get_place().all_proper_prefixes();
-        let mut proper_places_actions = prefixes.into_iter()
+        let mut prefixes = req.get_place()
+            .all_proper_prefixes()
+            .into_iter()
+            // We do not want to include prefixes containing quantified variables
+            // because it does not make sense to obtain a permission over such prefixes
+            .take_while(|prefix| !prefix.contains_any_var(&quant_vars));
+        let mut proper_places_actions = prefixes
             .try_fold(
                 Vec::<Action>::new(),
                 |mut actions, place| {
@@ -584,32 +678,65 @@ impl<'a> BranchCtxt<'a> {
         debug!("Try to satisfy requirement {}", req);
 
         // 3. Obtain with an unfold
-        // Find a predicate on a proper prefix of req
-        let existing_prefix_pred_opt: Option<vir::Expr> = self
-            .state
-            .pred_places()
-            .iter()
-            .find(|p| req.has_proper_prefix(p))
-            .cloned();
-        if let Some(existing_pred_to_unfold) = existing_prefix_pred_opt {
-            let perm_amount = self.state.pred()[&existing_pred_to_unfold];
-            debug!(
-                "We want to unfold {} with permission {} (we need at least {})",
-                existing_pred_to_unfold,
-                perm_amount,
-                req.get_perm_amount()
-            );
-            assert!(perm_amount >= req.get_perm_amount());
-            let variant = self.find_variant(&existing_pred_to_unfold, req.get_place());
-            let action = self.unfold(&existing_pred_to_unfold, perm_amount, variant, false);
-            actions.push(action);
-            debug!("We unfolded {}", existing_pred_to_unfold);
+        match req {
+            // Things differ a bit whether the req is quantified or not, but the idea is the same
+            Perm::Acc(..) | Perm::Pred(..) => {
+                // Find a predicate on a proper prefix of req
+                let existing_prefix_pred_opt: Option<vir::Expr> = self
+                    .state
+                    .pred_places()
+                    .iter()
+                    .find(|p| req.has_proper_prefix(p))
+                    .cloned();
+                if let Some(existing_pred_to_unfold) = existing_prefix_pred_opt {
+                    let perm_amount = self.state.pred()[&existing_pred_to_unfold];
+                    debug!(
+                        "We want to unfold {} with permission {} (we need at least {})",
+                        existing_pred_to_unfold,
+                        perm_amount,
+                        req.get_perm_amount()
+                    );
+                    assert!(perm_amount >= req.get_perm_amount());
+                    let variant = self.find_variant(&existing_pred_to_unfold, req.get_place());
+                    let action = self.unfold(&existing_pred_to_unfold, perm_amount, variant, false);
+                    actions.push(action);
+                    debug!("We unfolded {}", existing_pred_to_unfold);
 
-            // Check if we are done
-            let new_actions = self.do_obtain(req, false).or_else(|_| ObtainResult::Failure(req.clone()))?;
-            actions.extend(new_actions);
-            trace!("[exit] do_obtain");
-            return ObtainResult::Success(actions);
+                    // Check if we are done
+                    let new_actions = self.do_obtain(req, false).or_else(|_| ObtainResult::Failure(req.clone()))?;
+                    actions.extend(new_actions);
+                    trace!("[exit] do_obtain");
+                    return ObtainResult::Success(actions);
+                }
+            }
+            Perm::Quantified(quant) => {
+                let existing_prefix_quant_pred_opt = self
+                    .state
+                    .quantified()
+                    .iter()
+                    .find(|p| p.resource.is_pred() && quant.has_proper_prefix(p))
+                    .cloned();
+                if let Some(existing_quant_pred_to_unfold) = existing_prefix_quant_pred_opt {
+                    let perm_amount = existing_quant_pred_to_unfold.get_perm_amount();
+                    debug!(
+                        "We want to unfold {} with permission {} (we need at least {})",
+                        existing_quant_pred_to_unfold,
+                        perm_amount,
+                        req.get_perm_amount()
+                    );
+                    assert!(perm_amount >= req.get_perm_amount());
+                    let variant = self.find_variant(&existing_quant_pred_to_unfold.resource.get_place(), req.get_place());
+                    let action = self.unfold_quantified(&existing_quant_pred_to_unfold, perm_amount, variant);
+                    actions.push(action);
+                    debug!("We unfolded {}", existing_quant_pred_to_unfold);
+
+                    // Check if we are done
+                    let new_actions = self.do_obtain(req, false).or_else(|_| ObtainResult::Failure(req.clone()))?;
+                    actions.extend(new_actions);
+                    trace!("[exit] do_obtain");
+                    return ObtainResult::Success(actions);
+                }
+            }
         }
 
         // 4. Obtain with a fold
@@ -845,9 +972,9 @@ Quantified: {{
         inst_results: Vec<vir::InstantiationResult>
     ) -> ObtainResult {
         debug!(
-            "[enter] handle_quantified_instances_results\n\t\
-            req = {}\n\
-            taccess_results = {}\n\t\
+            "[enter] handle_quantified_instances_results\n\
+            eq = {}\n\
+            access_results = {}\n\
             state = {}",
             req,
             inst_results.iter()

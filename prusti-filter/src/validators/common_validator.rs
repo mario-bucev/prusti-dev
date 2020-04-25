@@ -485,7 +485,10 @@ pub trait CommonValidator<'a, 'tcx: 'a> {
         match rvalue {
             mir::Rvalue::Use(ref operand) => self.check_operand(mir, operand, span),
 
-            mir::Rvalue::Repeat(..) => unsupported!(self, span, "uses `repeat` operations"),
+            mir::Rvalue::Repeat(ref operand, _) => {
+                partially!(self, span, "uses `repeat` operations");
+                self.check_operand(mir, operand, span)
+            }
 
             mir::Rvalue::Ref(_, _, ref place) => self.check_place(mir, place, span),
 
