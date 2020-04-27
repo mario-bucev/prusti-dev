@@ -1113,6 +1113,14 @@ impl<'p, 'v: 'p, 'r: 'v, 'a: 'r, 'tcx: 'a> BackwardMirInterpreter<'tcx>
                         state.substitute_value(&opt_lhs_value_place.unwrap(), encoded_val);
                     }
 
+                    &mir::Rvalue::Len(ref place) => {
+                        info!("WE HAVE LHS = {:?}   RHS = {:?}", lhs, rhs);
+                        let seq = self.encode_derefs(place).0; //self.mir_encoder.encode_place(place).0;
+                        info!("ENCODED LHS = {}   ENCODED PLACE = {}", encoded_lhs, seq);
+                        // Substitute a place of a value with an expression
+                        state.substitute_value(&opt_lhs_value_place.unwrap(), vir::Expr::seq_len(seq));
+                    }
+
                     ref rhs => {
                         unimplemented!("encoding of '{:?}'", rhs);
                     }

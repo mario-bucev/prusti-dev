@@ -169,7 +169,7 @@ impl RequiredPermissionsGetter for vir::Expr {
         &self,
         predicates: &HashMap<String, vir::Predicate>,
     ) -> HashSet<Perm> {
-        trace!("[enter] get_required_permissions(expr={})", self);
+        info!("[enter] get_required_permissions(expr={})", self);
         let permissions = match self {
             vir::Expr::Const(_, _) => HashSet::new(),
 
@@ -251,6 +251,10 @@ impl RequiredPermissionsGetter for vir::Expr {
                 unreachable!("Let expressions should be introduced after fold/unfold.");
             }
 
+            // FIXME: if there are subsequent implications in `body`, they will not be translated correctly !
+            //  e.g. forall vars :: cond1 ==> cond2 ==> expr will give back
+            //  QuantifiedPermissions(cond1, permissions(cond2) ++ permissions(expr))
+            //  The cond2 disappears
             // If we have an expr of the form `forall vars :: cond ==> expr`
             // we convert the required permission into a quantified permission.
             vir::Expr::ForAll(
@@ -380,8 +384,8 @@ impl RequiredPermissionsGetter for vir::Expr {
                     .into_iter()
                     .collect(),
         };
-        trace!(
-            "[exit] get_required_permissions(expr={}): {:#?}",
+        info!(
+            "[exit] get_required_permissions(expr={}):\n{}",
             self,
             permissions
                 .iter()

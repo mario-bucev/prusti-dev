@@ -267,7 +267,7 @@ fn place_quantified_perm_difference(
     mut right: HashSet<vir::QuantifiedResourceAccess>,
 ) -> HashSet<vir::QuantifiedResourceAccess> {
     for right_quant in right.drain() {
-        match left.iter().find(|left_quant| left_quant.is_similar_to(&right_quant, false)).cloned() {
+        match left.iter().find(|left_quant| left_quant.is_similar_to_ignoring_preconds(&right_quant, false).is_some()).cloned() {
             Some(left_quant) => match (left_quant.get_perm_amount(), right_quant.get_perm_amount()) {
                 (PermAmount::Read, PermAmount::Read)
                 | (PermAmount::Read, PermAmount::Write)

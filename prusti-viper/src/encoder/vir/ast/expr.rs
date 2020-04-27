@@ -1300,13 +1300,76 @@ impl Expr {
         patcher.fold(self)
     }
 
-    // TODO: This won't work in case of conflict with bound variables
-    pub fn rename(self, old: &LocalVar, new: LocalVar) -> Self {
-        self.fold_expr(|e| match e {
-            Expr::Local(ref lv, ref p) if old == lv =>
-                Expr::Local(new.clone(), p.clone()),
-            _ => e
-        })
+    // TODO: misleading name
+    pub fn rename_single(self, old: &LocalVar, new: LocalVar) -> Self {
+        self.rename(&Some((old.clone(), new)).into_iter().collect())
+    }
+
+    pub fn rename(self, mapping: &HashMap<LocalVar, LocalVar>) -> Self {
+        if mapping.is_empty() {
+            self
+        } else {
+            self.subst_vars(
+                &mapping.iter()
+                    .map(|(lhs_lv, rhs_lv)|
+                        (lhs_lv.clone(), Expr::Local(rhs_lv.clone(), Position::default()))
+                    ).collect()
+            )
+        }
+    }
+
+    // TODO: Test this
+    pub fn subst_vars(self, subst_map: &HashMap<LocalVar, Expr>) -> Self {
+        struct SubstVar<'a> {
+            subst_map: &'a HashMap<LocalVar, Expr>,
+            excluding: HashSet<LocalVar>
+        }
+        impl<'a> ExprFolder for SubstVar<'a> {
+            fn fold_local(&mut self, v: LocalVar, p: Position) -> Expr {
+                if !self.excluding.contains(&v) {
+                    self.subst_map.get(&v).cloned().unwrap_or(Expr::Local(v, p))
+                } else {
+                    Expr::Local(v, p)
+                }
+            }
+
+            fn fold_forall(&mut self, vars: Vec<LocalVar>, triggers: Vec<Trigger>, body: Box<Expr>, p: Position) -> Expr {
+                vars.iter().for_each(|v| { self.excluding.insert(v.clone()); });
+                let folded_body = self.fold_boxed(body);
+                vars.iter().for_each(|v| { self.excluding.remove(v); });
+                Expr::ForAll(vars, triggers, self.fold_boxed(folded_body), p)
+            }
+
+            fn fold_let_expr(&mut self, var: LocalVar, expr: Box<Expr>, body: Box<Expr>, pos: Position) -> Expr {
+                self.excluding.insert(var.clone());
+                let folded_expr = self.fold_boxed(expr);
+                let folded_body = self.fold_boxed(body);
+                self.excluding.remove(&var);
+                Expr::LetExpr(var, folded_expr, folded_body, pos)
+            }
+
+            fn fold_quantified_resource_access(&mut self, quant: QuantifiedResourceAccess, p: Position) -> Expr {
+                quant.vars.iter().for_each(|v| { self.excluding.insert(v.clone()); });
+                let folded_cond = self.fold_boxed(quant.cond);
+                let folded_resource = quant.resource.map_expression(|e| self.fold(e));
+                quant.vars.iter().for_each(|v| { self.excluding.remove(v); });
+                Expr::QuantifiedResourceAccess(QuantifiedResourceAccess {
+                    vars: quant.vars,
+                    triggers: quant.triggers,
+                    cond: folded_cond,
+                    resource: folded_resource
+                }, p)
+            }
+        }
+
+        if subst_map.is_empty() {
+            self
+        } else {
+            SubstVar {
+                subst_map,
+                excluding: HashSet::new()
+            }.fold(self)
+        }
     }
 
     pub fn subst(self, subst_map: &HashMap<Expr, Expr>) -> Self {
@@ -1314,18 +1377,6 @@ impl Expr {
             self
         } else {
             self.fold_expr(|e| subst_map.get(&e).unwrap_or(&e).clone())
-        }
-    }
-
-    pub fn subst_vars(self, subst_map: &HashMap<LocalVar, Expr>) -> Self {
-        if subst_map.is_empty() {
-            self
-        } else {
-            self.fold_expr(|e| match &e {
-                Expr::Local(ref lv, _) =>
-                    subst_map.get(lv).unwrap_or(&e).clone(),
-                _ => e.clone()
-            })
         }
     }
 
@@ -1972,6 +2023,20 @@ pub enum InstantiationResultMatchType {
     PrefixPredAccMatch,
 }
 
+pub struct ProperPrefixResult {
+    // TODO: not filled
+    pub vars_mapping: HashMap<LocalVar, LocalVar>,
+    // Whether the preconditions are syntactically the same (up to the names of the quantified variables)
+    pub identical_cond: bool,
+}
+
+// TODO: very bad name
+pub struct SimilarToResult {
+    pub vars_mapping: HashMap<LocalVar, LocalVar>,
+    // Whether the preconditions are syntactically the same (up to the names of the quantified variables)
+    pub identical_cond: bool,
+}
+
 impl QuantifiedResourceAccess {
     pub fn try_instantiate(&self, perm_place: &Expr) -> Option<InstantiationResult> {
         if self.vars.is_empty() {
@@ -2089,13 +2154,58 @@ impl QuantifiedResourceAccess {
         ).is_success()
     }
 
-    pub fn has_proper_prefix(&self, other: &QuantifiedResourceAccess) -> bool {
+    /// Like ```is_similar_to``` but does not take the preconditions in account.
+    pub fn is_similar_to_ignoring_preconds(
+        &self,
+        other: &QuantifiedResourceAccess,
+        check_perm: bool
+    ) -> Option<SimilarToResult> {
         if self.vars.len() != other.vars.len() {
             // We assume that all vars are used...
-            return false;
+            return None;
         }
-        // TODO: do this correctly by unifying the bounded vars
-        self.cond == other.cond && self.resource.get_place().has_proper_prefix(other.resource.get_place())
+        let mut vars_mapping = HashMap::new();
+        if unify(
+            &self.resource.to_expression(),
+            &other.resource.to_expression(),
+            // The free vars asked by unify is for the subject (here, self)
+            &self.vars.iter().cloned().collect(),
+            &mut vars_mapping,
+            check_perm
+        ).is_success() {
+            let vars_mapping_lvs = vars_mapping.into_iter()
+                .filter_map(|(lhs_lv, rhs_expr)| match rhs_expr {
+                    Expr::Local(rhs_lv, _) => Some((lhs_lv, rhs_lv)),
+                    _ => None
+                }).collect::<HashMap<LocalVar, LocalVar>>();
+            if vars_mapping_lvs.len() != self.vars.len() {
+                None
+            } else {
+                let identical_cond = *self.cond == other.cond.clone().rename(&vars_mapping_lvs);
+                Some(SimilarToResult {
+                    vars_mapping: vars_mapping_lvs,
+                    identical_cond
+                })
+            }
+        } else {
+            None
+        }
+    }
+
+    pub fn has_proper_prefix(&self, other: &QuantifiedResourceAccess) -> Option<ProperPrefixResult> {
+        if self.vars.len() != other.vars.len() {
+            // We assume that all vars are used...
+            return None;
+        }
+        // FIXME: do this correctly by unifying the bounded vars
+        if self.resource.get_place().has_proper_prefix(other.resource.get_place()) {
+            Some(ProperPrefixResult {
+                vars_mapping: HashMap::new(), // TODO
+                identical_cond: self.cond == other.cond // TODO: do not forget to rename these according to vars_mapping
+            })
+        } else {
+            None
+        }
     }
 
     pub fn to_forall_expression(&self) -> Expr {
@@ -2473,8 +2583,8 @@ fn unify(
                     // We need to rename things out
                     let common_name = "__".to_owned() + &lvar.name + "$" + &rvar.name + "__";
                     let newvar = LocalVar::new(common_name, lvar.typ.clone());
-                    lnewbody = Some(box lbody.clone().rename(lvar, newvar.clone()));
-                    rnewbody = Some(box rbody.clone().rename(rvar, newvar.clone()));
+                    lnewbody = Some(box lbody.clone().rename_single(lvar, newvar.clone()));
+                    rnewbody = Some(box rbody.clone().rename_single(rvar, newvar.clone()));
                     assert!(!free_vars.contains(&newvar));
                 }
                 // Get the renamed bodies, or the original one if we don't need renaming

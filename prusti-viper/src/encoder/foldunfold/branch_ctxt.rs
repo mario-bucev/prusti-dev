@@ -190,6 +190,8 @@ impl<'a> BranchCtxt<'a> {
 
         // Simulate unfolding of `quant_pred`
         self.state.remove_quant(quant_pred);
+        // TODO: Can we be sure that these permissions are kept only for the "unfolding in" scope?
+        //  They shouldn't be visible afterwards
         self.state.insert_all_quant(quantified_places_in_pred);
 
         debug!("We unfolded {}", quant_pred.resource.get_place());
@@ -625,7 +627,7 @@ impl<'a> BranchCtxt<'a> {
     ///
     /// ``in_join`` – are we currently trying to join branches?
     fn obtain(&mut self, req: &Perm, in_join: bool) -> ObtainResult {
-        trace!("[enter] obtain(req={})", req);
+        info!("[enter] obtain(req={})", req);
         let quant_vars = match req {
             Perm::Quantified(quant) => quant.vars.iter().cloned().collect(),
             _ => HashSet::new()
@@ -655,18 +657,51 @@ impl<'a> BranchCtxt<'a> {
 
     // Actual implementation for obtaining the permissions
     fn do_obtain(&mut self, req: &Perm, in_join: bool) -> ObtainResult {
-        trace!("[enter] do_obtain(req={})", req);
+        info!("[enter] do_obtain(req={})", req);
 
         let mut actions: Vec<Action> = vec![];
 
-        trace!("Acc state before: {{\n{}\n}}", self.state.display_acc());
-        trace!("Pred state before: {{\n{}\n}}", self.state.display_pred());
-        trace!("Quant. state before: {{\n{}\n}}", self.state.display_quant());
+        info!("Acc state before: {{\n{}\n}}", self.state.display_acc());
+        info!("Pred state before: {{\n{}\n}}", self.state.display_pred());
+        info!("Quant. state before: {{\n{}\n}}", self.state.display_quant());
 
         // 1. Check if the requirement is satisfied
         if self.state.contains_perm(req) {
-            trace!("[exit] do_obtain: Requirement {} is satisfied", req);
+            info!("[exit] do_obtain: Requirement {} is satisfied", req);
             return ObtainResult::Success(actions);
+        }
+        // If the request is quantified, we may actually have a quantified resource access
+        // that "looks the same" but with different preconditions.
+        // e.g. we could have a req of `forall i :: 0 < i < 12 ==> acc(foo.val_array[i].val_ref)`
+        // and have in our permissions set `forall i :: 0 < i < 32 ==> acc(foo.val_array[i].val_ref)`
+        // In this case, we will assert that `forall i :: 0 < i < 12 ==> 0 < i < 32` and
+        // return success with this assertion.
+        if let Perm::Quantified(quant) = req {
+            if let Some((matched_quant, mapping_result)) = self.state.contains_quantified_ignoring_preconds(quant) {
+                // This cannot happen because we would have returned with `self.state.contains_perm`.
+                assert!(!mapping_result.identical_cond);
+                info!(
+                    "Mismatch between the preconditions of {} (request) and {} (matched quant.)",
+                    quant,
+                    matched_quant
+                );
+                actions.push(
+                    // TODO: The assertion gets incorrectly thrown away when we do action.to_expr(), which we always do in "unfolding in" expressions
+                    Action::Assertion(
+                        vir::Expr::forall(
+                            // We use the matched quant vars, and rename the request vars accordingly
+                            matched_quant.vars.clone(),
+                            vec![],
+                            vir::Expr::implies(
+                                quant.cond.clone().rename(&mapping_result.vars_mapping),
+                                *matched_quant.cond
+                            )
+                        )
+                    )
+                );
+                info!("[exit] do_obtain: Requirement {} is satisfied", req);
+                return ObtainResult::Success(actions);
+            }
         }
 
         if req.is_acc() && req.is_local() {
@@ -675,7 +710,7 @@ impl<'a> BranchCtxt<'a> {
             return ObtainResult::Success(actions);
         }
 
-        debug!("Try to satisfy requirement {}", req);
+        info!("Try to satisfy requirement {}", req);
 
         // 3. Obtain with an unfold
         match req {
@@ -714,11 +749,12 @@ impl<'a> BranchCtxt<'a> {
                     .state
                     .quantified()
                     .iter()
-                    .find(|p| p.resource.is_pred() && quant.has_proper_prefix(p))
-                    .cloned();
-                if let Some(existing_quant_pred_to_unfold) = existing_prefix_quant_pred_opt {
+                    .filter(|p| p.resource.is_pred())
+                    .filter_map(|p| quant.has_proper_prefix(p).map(|res| (p.clone(), res)))
+                    .next();
+                if let Some((existing_quant_pred_to_unfold, proper_prefix_res)) = existing_prefix_quant_pred_opt {
                     let perm_amount = existing_quant_pred_to_unfold.get_perm_amount();
-                    debug!(
+                    info!(
                         "We want to unfold {} with permission {} (we need at least {})",
                         existing_quant_pred_to_unfold,
                         perm_amount,
@@ -728,10 +764,45 @@ impl<'a> BranchCtxt<'a> {
                     let variant = self.find_variant(&existing_quant_pred_to_unfold.resource.get_place(), req.get_place());
                     let action = self.unfold_quantified(&existing_quant_pred_to_unfold, perm_amount, variant);
                     actions.push(action);
-                    debug!("We unfolded {}", existing_quant_pred_to_unfold);
+                    info!("We unfolded {}", existing_quant_pred_to_unfold);
+                    let new_req = {
+                        if proper_prefix_res.identical_cond {
+                            req.clone()
+                        } else {
+                            // The preconditions aren't the same, so we will just assert that the
+                            // preconds of the request implies the preconds of what we have (existing_quant_pred_to_unfold).
+                            // Then, we will replace the preconds of the request with the preconds
+                            // of existing_quant_pred_to_unfold for the recursive call.
+                            info!(
+                                "Mismatch between the preconditions of {} (request) and {} (unfolded)",
+                                quant,
+                                existing_quant_pred_to_unfold
+                            );
+                            // TODO: perform renaming
+                            actions.push(
+                                // TODO: The assertion gets incorrectly thrown away when we do action.to_expr(), which we always do in "unfolding in" expressions
+                                Action::Assertion(
+                                    vir::Expr::forall(
+                                        // We use existing_quant_pred_to_unfold vars,
+                                        // and rename the request vars accordingly
+                                        existing_quant_pred_to_unfold.vars.clone(),
+                                        vec![],
+                                        vir::Expr::implies(
+                                            *quant.cond.clone(),
+                                            *existing_quant_pred_to_unfold.cond.clone()
+                                        )
+                                    )
+                                )
+                            );
+                            let mut new_quant = quant.clone();
+                            // TODO: perform renaming
+                            new_quant.cond = existing_quant_pred_to_unfold.cond.clone();
+                            Perm::Quantified(new_quant)
+                        }
+                    };
 
                     // Check if we are done
-                    let new_actions = self.do_obtain(req, false).or_else(|_| ObtainResult::Failure(req.clone()))?;
+                    let new_actions = self.do_obtain(&new_req, false).or_else(|_| ObtainResult::Failure(req.clone()))?;
                     actions.extend(new_actions);
                     trace!("[exit] do_obtain");
                     return ObtainResult::Success(actions);

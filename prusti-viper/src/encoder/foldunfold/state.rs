@@ -365,6 +365,16 @@ impl State {
         self.get_quantified(quant, false).is_some()
     }
 
+    pub fn contains_quantified_ignoring_preconds(
+        &self,
+        quant: &vir::QuantifiedResourceAccess
+    ) -> Option<(vir::QuantifiedResourceAccess, vir::SimilarToResult)> {
+        self.quant.iter()
+            .filter_map(|x| x.is_similar_to_ignoring_preconds(quant, false)
+                .map(|res| (x.clone(), res))
+            ).next()
+    }
+
     /// Note: the permission amount is currently ignored
     pub fn contains_perm(&self, item: &Perm) -> bool {
         match item {
