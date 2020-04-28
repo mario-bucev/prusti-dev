@@ -541,7 +541,7 @@ pub trait CommonValidator<'a, 'tcx: 'a> {
     fn check_cast(
         &mut self,
         mir: &mir::Mir<'tcx>,
-        _cast_kind: mir::CastKind,
+        cast_kind: mir::CastKind,
         op: &mir::Operand<'tcx>,
         dst_ty: ty::Ty<'tcx>,
         span: Span,
@@ -673,7 +673,13 @@ pub trait CommonValidator<'a, 'tcx: 'a> {
                 ty::TypeVariants::TyUint(ast::UintTy::Usize),
             ) => {} // OK
 
-            _ => unsupported!(self, span, "uses unsupported casts"),
+            (
+                ty::TypeVariants::TyRef(_, ty::TyS { sty: ty::TypeVariants::TyArray(..), .. }, _),
+                ty::TypeVariants::TyRef(_, ty::TyS { sty: ty::TypeVariants::TySlice(..), .. }, _),
+            ) if cast_kind == mir::CastKind::Unsize =>
+                partially!(self, span, "uses casts from array to slice"),
+
+            _ => unsupported!(self, span, format!("uses unsupported casts ({} -> {}, cast of type {:?})", src_ty.sty, dst_ty.sty, cast_kind)),
         };
     }
 

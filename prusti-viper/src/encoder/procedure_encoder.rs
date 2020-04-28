@@ -781,6 +781,14 @@ impl<'p, 'v: 'p, 'r: 'v, 'a: 'r, 'tcx: 'a> ProcedureEncoder<'p, 'v, 'r, 'a, 'tcx
                     &mir::Rvalue::Repeat(ref operand, len) => {
                         self.encode_assign_repeat(operand, len, encoded_lhs, ty, location)
                     }
+                    &mir::Rvalue::Cast(
+                        mir::CastKind::Unsize,
+                        ref operand,
+                        // i.e. reference to slice
+                        ty::TyS { sty: ty::TypeVariants::TyRef(_, slice_ty@ty::TyS { sty: ty::TypeVariants::TySlice(..), .. }, _), .. }
+                    ) => {
+                        self.encode_assign_cast_array_to_slice(operand, encoded_lhs, slice_ty, location)
+                    }
                     ref rhs => {
                         unimplemented!("encoding of '{:?}'", rhs);
                     }
@@ -866,6 +874,21 @@ impl<'p, 'v: 'p, 'r: 'v, 'a: 'r, 'tcx: 'a> ProcedureEncoder<'p, 'v, 'r, 'a, 'tcx
                 assert_eq!(expiring.get_type(), restored.get_type());
                 (expiring, restored, false)
             }
+            mir::Rvalue::Cast(
+                mir::CastKind::Unsize,
+                mir::Operand::Move(ref rhs_place),
+                // i.e. reference to slice
+                ty::TyS { sty: ty::TypeVariants::TyRef(_, ty::TyS { sty: ty::TypeVariants::TySlice(..), .. }, mutbl), .. }
+            ) => {
+                let (expiring, restored_base, ref_field) = encode(rhs_place);
+                let restored = restored_base.clone().field(ref_field);
+                assert_eq!(expiring.get_type(), restored.get_type());
+                let is_mut = match mutbl {
+                    Mutability::MutMutable => true,
+                    Mutability::MutImmutable => false,
+                };
+                (expiring, restored, is_mut)
+            }
 
             ref x => unreachable!("Borrow restores rvalue {:?}", x),
         }
@@ -936,6 +959,15 @@ impl<'p, 'v: 'p, 'r: 'v, 'a: 'r, 'tcx: 'a> ProcedureEncoder<'p, 'v, 'r, 'a, 'tcx
                     | &mir::Rvalue::Use(mir::Operand::Copy(_)) => false,
                     &mir::Rvalue::Ref(_, mir::BorrowKind::Mut { .. }, _)
                     | &mir::Rvalue::Use(mir::Operand::Move(_)) => true,
+                    mir::Rvalue::Cast(
+                        mir::CastKind::Unsize,
+                        mir::Operand::Move(_),
+                        // i.e. reference to slice
+                        ty::TyS { sty: ty::TypeVariants::TyRef(_, ty::TyS { sty: ty::TypeVariants::TySlice(..), .. }, mutbl), .. }
+                    ) => match mutbl {
+                        Mutability::MutMutable => true,
+                        Mutability::MutImmutable => false,
+                    }
                     x => unreachable!("{:?}", x),
                 },
                 ref x => unreachable!("{:?}", x),
@@ -4098,52 +4130,65 @@ impl<'p, 'v: 'p, 'r: 'v, 'a: 'r, 'tcx: 'a> ProcedureEncoder<'p, 'v, 'r, 'a, 'tcx
         self.encode_copy_value_assign(encoded_lhs, vir::Expr::seq_len(encoded_seq), ty, location)
     }
 
-    // [operand; len] for arrays
+    /// Creates statements for assigning values to the given lhs.
+    /// The actual assignment expression will have the same form as constructed by
+    /// `Encoder::encode_seq_elem_mem_eq`.
+    fn encode_assign_seq(
+        &mut self,
+        encoded_lhs: vir::Expr,
+        seq_ty: ty::Ty<'tcx>,
+        // TODO: not using location seems odd
+        _location: mir::Location,
+        value_at_i: impl FnOnce(vir::LocalVar) -> vir::Expr + Clone,
+    ) -> Vec<vir::Stmt> {
+        let mut stmts = self.encode_havoc_and_allocation(&encoded_lhs);
+        let assign_expr = self.encoder.encode_seq_elem_mem_eq(
+            encoded_lhs,
+            seq_ty,
+            value_at_i,
+        );
+        stmts.push(vir::Stmt::Inhale(assign_expr, vir::FoldingBehaviour::Expr));
+        stmts
+    }
+
+    // TODO: `len` is not used
+    /// Encodes `lhs = [operand; len]`
     fn encode_assign_repeat(
         &mut self,
         operand: &mir::Operand<'tcx>,
         len: u64,
         encoded_lhs: vir::Expr,
-        ty: ty::Ty<'tcx>,
-        // TODO: not using location seems odd
-        _location: mir::Location,
+        seq_ty: ty::Ty<'tcx>,
+        location: mir::Location,
     ) -> Vec<vir::Stmt> {
-        trace!("[enter] encode_assign_repeat(lhs={}, rhs=[{:?}; {}])", encoded_lhs, operand, len);
+        info!("[enter] encode_assign_repeat(lhs={}, rhs=[{:?}; {}])", encoded_lhs, operand, len);
         // FIXME: This will cause a panic for struct/adt operand
         //  They require a different encoding
         let encoded_operand = self.mir_encoder.encode_operand_expr(operand);
-        let val_array = self.encoder.encode_value_field(ty);
-        // lhs.val_array
-        let encoded_lhs_val_array = encoded_lhs.clone().field(val_array.clone());
+        self.encode_assign_seq(encoded_lhs, seq_ty, location, |_| encoded_operand)
+    }
 
-        let idx_local = vir::LocalVar::new("i", vir::Type::Int);
-        let idx = vir::Expr::local(idx_local.clone());
-        // lhs.val_array[i]
-        let elems = vir::Expr::seq_index(encoded_lhs_val_array.clone(), idx.clone());
-        let operand_ty = self.mir_encoder.get_operand_ty(operand);
-        // FIXME: This will cause a panic for struct/adt operand too, for the same reasons
-        // lhs.val_array[i].val_ref.val_x (e.g. x = int for integer types)
-        let elems_field = elems.clone()
-            .field(self.encoder.encode_dereference_field(operand_ty))
-            .field(self.encoder.encode_value_field(operand_ty));
-
-        // 0 <= i < |lhs.val_array|
-        let idx_bounds = vir::Expr::and(
-            vir::Expr::le_cmp(
-                vir::Expr::Const(vir::Const::Int(0), vir::Position::default()),
-                idx.clone()
-            ),
-            vir::Expr::lt_cmp(idx.clone(), vir::Expr::seq_len(encoded_lhs_val_array.clone()))
-        );
-        let eq = vir::Expr::eq_cmp(elems_field, encoded_operand);
-        let forall = vir::Expr::forall(
-            vec![idx_local],
-            vec![vir::Trigger::new(vec![elems.clone()])],
-            vir::Expr::implies(idx_bounds, eq)
-        );
-
+    fn encode_assign_cast_array_to_slice(
+        &mut self,
+        operand: &mir::Operand<'tcx>,
+        encoded_lhs: vir::Expr,
+        slice_ty: ty::Ty<'tcx>,
+        location: mir::Location,
+    ) -> Vec<vir::Stmt> {
+        // Operand here is the "casted" array-to-slice.
+        let encoded_operand = self.mir_encoder.encode_operand_expr(operand);
         let mut stmts = self.encode_havoc_and_allocation(&encoded_lhs);
-        stmts.push(vir::Stmt::Inhale(forall, vir::FoldingBehaviour::Expr));
+        let assign_expr = self.encoder.encode_memory_eq_seq(
+            encoded_lhs.clone().try_deref().unwrap_or(encoded_lhs.clone()),
+            encoded_operand,
+            slice_ty,
+        );
+        stmts.push(vir::Stmt::Inhale(assign_expr, vir::FoldingBehaviour::Expr));
+        // Store a label for this state. This is necessary since borrowing happens.
+        let label = self.cfg_method.get_fresh_label_name();
+        debug!("Current loc {:?} has label {}", location, label);
+        self.label_after_location.insert(location, label.clone());
+        stmts.push(vir::Stmt::Label(label.clone()));
         stmts
     }
 

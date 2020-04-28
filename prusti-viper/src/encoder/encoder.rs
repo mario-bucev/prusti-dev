@@ -451,6 +451,139 @@ impl<'v, 'r, 'a, 'tcx> Encoder<'v, 'r, 'a, 'tcx> {
         )
     }
 
+    /// Creates the following expression:
+    /// ```forall i: Int {triggers(i, seq.val_array[i].val_ref)} ::
+    ///     0 <= i < |seq.val_array| ==> prop(i, seq.val_array[i].val_ref)```
+    pub fn encode_seq_elem_property(
+        &self,
+        seq: vir::Expr,
+        seq_ty: ty::Ty<'tcx>,
+        prop: impl FnOnce(vir::LocalVar, vir::Expr) -> vir::Expr,
+        triggers: Option<impl FnOnce(vir::LocalVar, vir::Expr) -> Vec<vir::Trigger>>,
+    ) -> vir::Expr {
+        let elem_ty = match seq_ty.sty {
+            ty::TypeVariants::TyArray(elem_ty, _) |
+            ty::TypeVariants::TySlice(elem_ty) => elem_ty,
+            ref x => panic!("Got {:?} but expected a TyArray or a TySlice", x),
+        };
+        let val_ref = self.encode_dereference_field(elem_ty);
+        let val_array = self.encode_value_field(seq_ty);
+        let i = vir::LocalVar::new("i", vir::Type::Int);
+        let i_expr = vir::Expr::local(i.clone());
+        // seq.val_array
+        let seq_val_array = seq.clone().field(val_array.clone());
+        // seq.val_array[i].val_ref
+        let elem_at_i = vir::Expr::seq_index(seq_val_array.clone(), i_expr.clone())
+            .field(val_ref);
+        // 0 <= i < |seq.val_array|
+        let idx_bounds = vir::Expr::and(
+            vir::Expr::le_cmp(
+                vir::Expr::Const(vir::Const::Int(0), vir::Position::default()),
+                i_expr.clone()
+            ),
+            vir::Expr::lt_cmp(i_expr.clone(), vir::Expr::seq_len(seq_val_array.clone()))
+        );
+        vir::Expr::forall(
+            vec![i.clone()],
+            triggers.map(|f| f(i.clone(), elem_at_i.clone())).unwrap_or(vec![]),
+            vir::Expr::implies(
+                idx_bounds,
+                prop(i.clone(), elem_at_i.clone())
+            )
+        )
+    }
+
+    // TODO: I are speakening English very good
+    /// Creates an expression to assess the content of the sequence,
+    /// i.e. to define to what the elements of the sequence are equal to.
+    /// The expression returned will depend on the form of `value_at_i`.
+    /// If it is a place, the expression will have the following form:
+    /// ```forall i: Int {seq.val_array[i].val_ref, [value_at_i(i)]} ::
+    ///     0 <= i < |seq.val_array| ==> mem_eq(seq.val_array[i].val_ref, value_at_i(i))```
+    /// where `mem_eq` is the predicate describing equality for the type of the elements.
+    /// Otherwise, this expression will be returned:
+    /// ```forall i: Int {seq.val_array[i].val_ref, [value_at_i(i)]} ::
+    ///     0 <= i < |seq.val_array| ==> seq.val_array[i].val_ref.val_x == value_at_i(i)```
+    /// where `val_x` is `val_int`, `val_ref`, etc. depending on the type of the elements.
+    /// It should be noted that `value_at_i(i)` should always return the same type of expression
+    /// for all i i.e. either a place or some other expressions. Places and non-places cannot
+    /// be mixed
+    pub fn encode_seq_elem_mem_eq(
+        &self,
+        seq: vir::Expr,
+        seq_ty: ty::Ty<'tcx>,
+        value_at_i: impl FnOnce(vir::LocalVar) -> vir::Expr + Clone,
+    ) -> vir::Expr {
+        let elem_ty = match seq_ty.sty {
+            ty::TypeVariants::TyArray(elem_ty, _) |
+            ty::TypeVariants::TySlice(elem_ty) => elem_ty,
+            ref x => panic!("Got {:?} but expected a TyArray or a TySlice", x),
+        };
+        self.encode_seq_elem_property(
+            seq.clone(),
+            seq_ty,
+            |i, elem_at_i| { // elem_at_i as the form seq.val_array[i].val_ref
+                let val_at_i = (value_at_i.clone())(i);
+                if val_at_i.is_place() {
+                    self.encode_memory_eq_func_app(
+                        elem_at_i,
+                        val_at_i,
+                        elem_ty,
+                        vir::Position::default()
+                    )
+                } else {
+                    vir::Expr::eq_cmp(
+                        // seq.val_array[i].val_ref.val_x (e.g. x = int for integer types)
+                        elem_at_i.field(self.encode_value_field(elem_ty)),
+                        val_at_i
+                    )
+                }
+            },
+            Some(|i: vir::LocalVar, elem_at_i: vir::Expr| -> Vec<vir::Trigger> {
+                // elem_at_i as the form seq.val_array[i].val_ref
+                let mut triggs = vec![elem_at_i];
+                let val_at_i = (value_at_i.clone())(i.clone());
+                if val_at_i.contains_var(&i) {
+                    triggs.push(val_at_i);
+                }
+                vec![vir::Trigger::new(triggs)]
+            })
+        )
+    }
+
+    /// Encodes an expressions assessing that the sequences `first` and `second` are equal.
+    pub fn encode_memory_eq_seq(
+        &self,
+        first: vir::Expr,
+        second: vir::Expr,
+        seq_ty: ty::Ty<'tcx>,
+    ) -> vir::Expr {
+        let elem_ty = match seq_ty.sty {
+            ty::TypeVariants::TyArray(elem_ty, _) |
+            ty::TypeVariants::TySlice(elem_ty) => elem_ty,
+            ref x => panic!("Got {:?} but expected a TyArray or a TySlice", x),
+        };
+        let val_array = self.encode_value_field(seq_ty);
+        // first.val_array
+        let first_val_array = first.clone().field(val_array.clone());
+        let second_val_array = second.clone().field(val_array.clone());
+        let same_len = vir::Expr::eq_cmp(
+            vir::Expr::seq_len(first_val_array.clone()),
+            vir::Expr::seq_len(second_val_array.clone()),
+        );
+        let seq_eq = self.encode_seq_elem_mem_eq(
+            first,
+            seq_ty,
+            |i| {
+                let val_ref = self.encode_dereference_field(elem_ty.clone());
+                // second.val_array[i].val_ref
+                vir::Expr::seq_index(second_val_array.clone(), vir::Expr::local(i.clone()))
+                    .field(val_ref)
+            }
+        );
+        vir::Expr::and(same_len, seq_eq)
+    }
+
     fn encode_memory_eq_tuple(
         &self,
         first: vir::Expr,
@@ -521,59 +654,6 @@ impl<'v, 'r, 'a, 'tcx> Encoder<'v, 'r, 'a, 'tcx> {
         vir::ExprIterator::conjoin(&mut conjuncts.into_iter())
     }
 
-    fn encode_memory_eq_array(
-        &self,
-        first: vir::Expr,
-        second: vir::Expr,
-        arr_ty: ty::Ty<'tcx>,
-    ) -> vir::Expr {
-        let inner_ty = match arr_ty.sty {
-            ty::TypeVariants::TyArray(inner_ty, _) => inner_ty,
-            ref x => panic!("Got {:?} but expected a TyArray", x),
-        };
-        let val_ref = self.encode_dereference_field(inner_ty);
-        let val_array = self.encode_value_field(arr_ty);
-        let idx_local = vir::LocalVar::new("i", vir::Type::Int);
-        let idx = vir::Expr::local(idx_local.clone());
-
-        // first.val_array
-        let first_val_array = first.clone().field(val_array.clone());
-        let second_val_array = second.clone().field(val_array.clone());
-
-        let same_len = vir::Expr::eq_cmp(
-            vir::Expr::seq_len(first_val_array.clone()),
-            vir::Expr::seq_len(second_val_array.clone()),
-        );
-        // 0 <= i < |first.val_array|
-        let idx_bounds = vir::Expr::and(
-            vir::Expr::le_cmp(
-                vir::Expr::Const(vir::Const::Int(0), vir::Position::default()),
-                idx.clone()
-            ),
-            vir::Expr::lt_cmp(idx.clone(), vir::Expr::seq_len(first_val_array.clone()))
-        );
-
-        // first.val_array[i].val_ref
-        let first_val_array_elem = vir::Expr::seq_index(first_val_array.clone(), idx.clone())
-            .field(val_ref.clone());
-        let second_val_array_elem = vir::Expr::seq_index(second_val_array.clone(), idx.clone())
-            .field(val_ref);
-
-        let elem_mem_eq = self.encode_memory_eq_func_app(
-            first_val_array_elem, second_val_array_elem, inner_ty, vir::Position::default()
-        );
-        let forall_elem_mem_eq = vir::Expr::forall(
-            vec![idx_local],
-            vec![vir::Trigger::new(vec![
-                vir::Expr::seq_index(first_val_array.clone(), idx.clone()),
-                vir::Expr::seq_index(second_val_array.clone(), idx.clone())
-            ])],
-            vir::Expr::implies(idx_bounds, elem_mem_eq)
-        );
-
-        vir::Expr::and(same_len, forall_elem_mem_eq)
-    }
-
     fn encode_memory_eq_func_body(
         &self,
         first: vir::Expr,
@@ -602,7 +682,7 @@ impl<'v, 'r, 'a, 'tcx> Encoder<'v, 'r, 'a, 'tcx> {
                 None
             }
             ty::TypeVariants::TyArray(..) => {
-                Some(self.encode_memory_eq_array(first.clone(), second.clone(), self_ty))
+                Some(self.encode_memory_eq_seq(first.clone(), second.clone(), self_ty))
             }
 
             ref x => unimplemented!("{:?}", x),

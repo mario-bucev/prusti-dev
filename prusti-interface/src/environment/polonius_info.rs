@@ -14,6 +14,7 @@ use super::procedure::Procedure;
 use crate::utils;
 use polonius_engine::{Algorithm, Atom, Output};
 use rustc::mir;
+use rustc::ty;
 use rustc_hash::FxHashMap;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
@@ -502,6 +503,12 @@ fn get_borrowed_places<'a, 'tcx: 'a>(
                         })
                         .collect()
                 }
+                &mir::Rvalue::Cast(
+                    mir::CastKind::Unsize,
+                    mir::Operand::Move(ref place),
+                    // i.e. reference to slice
+                    ty::TyS { sty: ty::TypeVariants::TyRef(_, ty::TyS { sty: ty::TypeVariants::TySlice(..), .. }, _), .. }
+                ) => vec![place],
                 x => unreachable!("{:?}", x),
             },
             ref x => unreachable!("{:?}", x),

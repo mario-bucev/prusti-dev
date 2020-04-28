@@ -1485,6 +1485,10 @@ impl Expr {
         result
     }
 
+    pub fn contains_var(&self, lv: &LocalVar) -> bool {
+        self.contains_any_var(&Some(lv.clone()).into_iter().collect())
+    }
+
     pub fn contains_any_var(&self, lvs: &HashSet<LocalVar>) -> bool {
         !lvs.is_empty() && !self.get_local_vars(lvs).is_empty()
     }
