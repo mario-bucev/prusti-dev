@@ -522,7 +522,7 @@ impl<'v, 'r, 'a, 'tcx> Encoder<'v, 'r, 'a, 'tcx> {
         self.encode_seq_elem_property(
             seq.clone(),
             seq_ty,
-            |i, elem_at_i| { // elem_at_i as the form seq.val_array[i].val_ref
+            |i, elem_at_i| { // elem_at_i has the form seq.val_array[i].val_ref
                 let val_at_i = (value_at_i.clone())(i);
                 if val_at_i.is_place() {
                     self.encode_memory_eq_func_app(
@@ -540,7 +540,7 @@ impl<'v, 'r, 'a, 'tcx> Encoder<'v, 'r, 'a, 'tcx> {
                 }
             },
             Some(|i: vir::LocalVar, elem_at_i: vir::Expr| -> Vec<vir::Trigger> {
-                // elem_at_i as the form seq.val_array[i].val_ref
+                // elem_at_i has the form seq.val_array[i].val_ref
                 let mut triggs = vec![elem_at_i];
                 let val_at_i = (value_at_i.clone())(i.clone());
                 if val_at_i.contains_var(&i) {

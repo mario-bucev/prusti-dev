@@ -268,8 +268,10 @@ impl RequiredPermissionsGetter for vir::Expr {
                     .map(|var| Acc(vir::Expr::local(var.clone()), PermAmount::Write))
                     .collect();
                 let vars_set = vars.iter().cloned().collect();
-                perm_difference(body.get_required_permissions(predicates), vars_places)
-                    .into_iter().map(|perm| {
+                let mut perm_body: HashSet<_> = perm_difference(
+                    body.get_required_permissions(predicates),
+                    vars_places.clone()
+                ).into_iter().map(|perm| {
                     let vars_in_perm = perm.get_place().get_local_vars(&vars_set);
                     if vars_in_perm.is_empty() {
                         perm
@@ -310,7 +312,11 @@ impl RequiredPermissionsGetter for vir::Expr {
                             }
                         )
                     }
-                }).collect()
+                }).collect();
+                let perm_cond =
+                    perm_difference(cond.get_required_permissions(predicates), vars_places);
+                perm_body.extend(perm_cond);
+                perm_body
             }
 
             vir::Expr::ForAll(vars, _triggers, box body, _) => {

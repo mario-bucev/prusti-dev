@@ -38,6 +38,7 @@ pub enum Action {
     /// Note that this problem shouldn't arise for `read` accesses, but we still
     /// conservatively temporarily unfold `read` (instantiated) predicate accesses.
     TemporaryUnfold(String, Vec<vir::Expr>, PermAmount, vir::MaybeEnumVariantIndex),
+    // TODO: If we carefully insert "unfolding in" in to_expr, we should not need this case (which is sort of a hack)
     /// An `unfolding` expression happening inside a `forall` expression.
     /// For instance, suppose that we have the following quantified predicate:
     /// ```forall i: Int :: { foo.val_array[i] } 0 <= i && i < |foo.val_array|
@@ -117,8 +118,14 @@ impl Action {
                 }
                 other => panic!("to_expr of a {} and an inner_expr {} which is not a forall", self, other),
             }
-            // TODO: assertion ==> inner_expr can lead to ill-formed expression, maybe panic instead...
-            Action::Assertion(_) => inner_expr, // The assertion has already been taken care of.
+            Action::Assertion(_) => {
+                // The translation of an assertion depends on the context.
+                // For assert/exhale statements, we should have assertion && inner expr.
+                // For inhale statements on the other hand, we should drop the assertion because
+                // the inhale may actually assume some parts of the assertion
+                // (e.g. for bounds checks).
+                panic!("An assertion has no equivalent in vir::Expr (self={}, inner_expr={})", self, inner_expr)
+            }
         }
     }
 
