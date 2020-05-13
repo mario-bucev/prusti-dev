@@ -31,8 +31,9 @@ mod state;
 
 pub fn add_folding_unfolding_to_expr(expr: vir::Expr, bctxt: &BranchCtxt) -> vir::Expr {
     let bctxt_at_label = HashMap::new();
-    let expr = ExprReplacer::new(bctxt.clone(), &bctxt_at_label, true).replace(expr, AssertionsConnective::Conjunction);
-    ExprReplacer::new(bctxt.clone(), &bctxt_at_label, false).replace(expr, AssertionsConnective::Conjunction)
+    // TODO: handle foldings
+    let expr = ExprReplacer::new(bctxt.clone(), &bctxt_at_label, true).replace(expr, AssertionsConnective::Conjunction).0;
+    ExprReplacer::new(bctxt.clone(), &bctxt_at_label, false).replace(expr, AssertionsConnective::Conjunction).0
 }
 
 pub fn add_folding_unfolding_to_function(
@@ -111,11 +112,11 @@ impl<'p, 'v: 'p, 'r: 'v, 'a: 'r, 'tcx: 'a> FoldUnfold<'p, 'v, 'r, 'a, 'tcx> {
         }
     }
 
-    fn replace_expr(&self, expr: &vir::Expr, curr_bctxt: &BranchCtxt<'p>, assertions_connective: AssertionsConnective) -> vir::Expr {
+    fn replace_expr(&self, expr: &vir::Expr, curr_bctxt: &BranchCtxt<'p>, assertions_connective: AssertionsConnective) -> (vir::Expr, Vec<vir::Stmt>) {
         ExprReplacer::new(curr_bctxt.clone(), &self.bctxt_at_label, false).replace(expr.clone(), assertions_connective)
     }
 
-    fn replace_old_expr(&self, expr: &vir::Expr, curr_bctxt: &BranchCtxt<'p>, assertions_connective: AssertionsConnective) -> vir::Expr {
+    fn replace_old_expr(&self, expr: &vir::Expr, curr_bctxt: &BranchCtxt<'p>, assertions_connective: AssertionsConnective) -> (vir::Expr, Vec<vir::Stmt>) {
         ExprReplacer::new(curr_bctxt.clone(), &self.bctxt_at_label, true).replace(expr.clone(), assertions_connective)
     }
 
@@ -124,19 +125,26 @@ impl<'p, 'v: 'p, 'r: 'v, 'a: 'r, 'tcx: 'a> FoldUnfold<'p, 'v, 'r, 'a, 'tcx> {
         &self,
         stmt: vir::Stmt,
         bctxt: &BranchCtxt<'p>,
-    ) -> vir::Stmt {
+    ) -> (vir::Stmt, Vec<vir::Stmt>) {
         trace!("[enter] rewrite_stmt_with_unfoldings_in_old: {}", stmt);
         let connective = match &stmt {
             vir::Stmt::Inhale(..) => AssertionsConnective::Drop,
             _ => AssertionsConnective::Conjunction
         };
-        let result = stmt.map_expr(|e| self.replace_old_expr(&e, bctxt, connective));
+        let mut foldings = vec![];
+        let result = stmt.map_expr(|e| {
+            let (new_expr, new_foldings) =
+                self.replace_old_expr(&e, bctxt, connective);
+            // TODO: yikes
+            foldings.extend(new_foldings);
+            new_expr
+        });
         trace!("[exit] rewrite_stmt_with_unfoldings_in_old = {}", result);
-        result
+        (result, foldings)
     }
 
     /// Insert "unfolding in" expressions
-    fn rewrite_stmt_with_unfoldings(&self, stmt: vir::Stmt, bctxt: &BranchCtxt<'p>) -> vir::Stmt {
+    fn rewrite_stmt_with_unfoldings(&self, stmt: vir::Stmt, bctxt: &BranchCtxt<'p>) -> (vir::Stmt, Vec<vir::Stmt>) {
         match stmt {
             vir::Stmt::Inhale(expr, folding) => {
                 // Compute inner state
@@ -149,7 +157,9 @@ impl<'p, 'v: 'p, 'r: 'v, 'a: 'r, 'tcx: 'a> FoldUnfold<'p, 'v, 'r, 'a, 'tcx> {
                 );
 
                 // Rewrite statement
-                vir::Stmt::Inhale(self.replace_expr(&expr, &inner_bctxt, AssertionsConnective::Drop), folding)
+                let (new_expr, foldings) =
+                    self.replace_expr(&expr, &inner_bctxt, AssertionsConnective::Drop);
+                (vir::Stmt::Inhale(new_expr, folding), foldings)
             }
             vir::Stmt::TransferPerm(lhs, rhs, unchecked) => {
                 // Compute rhs state
@@ -162,26 +172,43 @@ impl<'p, 'v: 'p, 'r: 'v, 'a: 'r, 'tcx: 'a> FoldUnfold<'p, 'v, 'r, 'a, 'tcx> {
                         .filter(|p| p.is_pred())
                 );
                 */
-                let new_lhs = if unchecked {
-                    lhs
+                let (new_lhs, lhs_foldings) = if unchecked {
+                    (lhs, vec![])
                 } else {
                     self.replace_expr(&lhs, &bctxt, AssertionsConnective::Conjunction)
                 };
 
                 // Rewrite statement
-                vir::Stmt::TransferPerm(new_lhs, self.replace_old_expr(&rhs, &rhs_bctxt, AssertionsConnective::Conjunction), unchecked)
+                let (new_rhs, rhs_foldings) =
+                    self.replace_old_expr(&rhs, &rhs_bctxt, AssertionsConnective::Conjunction);
+                let mut foldings = lhs_foldings;
+                foldings.extend(rhs_foldings);
+                (vir::Stmt::TransferPerm(new_lhs, new_rhs, unchecked), foldings)
             }
             vir::Stmt::PackageMagicWand(wand, stmts, label, vars, pos) => {
-                vir::Stmt::PackageMagicWand(
-                    // TODO: how should assertions be "connected"?
-                    self.replace_expr(&wand, bctxt, AssertionsConnective::Conjunction),
+                // TODO: how should assertions be "connected"?
+                let (new_wand, foldings) =
+                    self.replace_expr(&wand, bctxt, AssertionsConnective::Conjunction);
+                let new_stmt = vir::Stmt::PackageMagicWand(
+                    new_wand,
                     stmts,
                     label,
                     vars,
                     pos,
-                )
+                );
+                (new_stmt, foldings)
             }
-            _ => stmt.map_expr(|e| self.replace_expr(&e, bctxt, AssertionsConnective::Conjunction)),
+            _ => {
+                let mut foldings = vec![];
+                let new_stmt = stmt.map_expr(|e| {
+                    let (new_expr, new_foldings) =
+                        self.replace_expr(&e, bctxt, AssertionsConnective::Conjunction);
+                    // TODO: yikes
+                    foldings.extend(new_foldings);
+                    new_expr
+                });
+                (new_stmt, foldings)
+            },
         }
     }
 
@@ -642,7 +669,7 @@ impl<'p, 'v: 'p, 'r: 'v, 'a: 'r, 'tcx: 'a> vir::CfgReplacer<BranchCtxt<'p>, Vec<
             return self.process_expire_borrows(dag, bctxt, curr_block_index, new_cfg, label);
         }
 
-        let mut stmt = stmt.clone();
+        let stmt = stmt.clone();
 
         // Store state for old expressions
         match stmt {
@@ -690,11 +717,14 @@ impl<'p, 'v: 'p, 'r: 'v, 'a: 'r, 'tcx: 'a> vir::CfgReplacer<BranchCtxt<'p>, Vec<
         }
 
         // 1. Insert "unfolding in" inside old expressions. This handles *old* requirements.
-        debug!("[step.1] replace_stmt: {}", stmt);
-        stmt = self.rewrite_stmt_with_unfoldings_in_old(stmt, &bctxt);
+        info!("[step.1] replace_stmt: {}", stmt);
+        let (mut stmt, foldings) = self.rewrite_stmt_with_unfoldings_in_old(stmt, &bctxt);
+        debug_assert!(foldings.iter().all(|stmt| match stmt { vir::Stmt::Fold(..) => true, _ => false }));
+        foldings.iter().for_each(|fold| bctxt.apply_stmt(fold));
+        stmts.extend(foldings);
 
         // 2. Obtain required *curr* permissions. *old* requirements will be handled at steps 0 and/or 4.
-        debug!("[step.2] replace_stmt: {}", stmt);
+        info!("[step.2] replace_stmt: {}", stmt);
         // Statements that will be applied after the current statement is applied.
         // This is needed to handle "temporary unfolds".
         // See comments on Action::TemporaryUnfold for more explanation.
@@ -766,7 +796,7 @@ impl<'p, 'v: 'p, 'r: 'v, 'a: 'r, 'tcx: 'a> vir::CfgReplacer<BranchCtxt<'p>, Vec<
         }
 
         // 3. Replace special statements
-        debug!("[step.3] replace_stmt: {}", stmt);
+        info!("[step.3] replace_stmt: {}", stmt);
         stmt = match stmt {
             vir::Stmt::PackageMagicWand(
                 vir::Expr::MagicWand(box ref lhs, box ref rhs, _, _),
@@ -822,7 +852,10 @@ impl<'p, 'v: 'p, 'r: 'v, 'a: 'r, 'tcx: 'a> vir::CfgReplacer<BranchCtxt<'p>, Vec<
 
         // 4. Add "unfolding" expressions in statement. This handles *old* requirements.
         info!("[step.4] replace_stmt: Add unfoldings in stmt {}", stmt);
-        stmt = self.rewrite_stmt_with_unfoldings(stmt, &bctxt);
+        let (stmt, foldings) = self.rewrite_stmt_with_unfoldings(stmt, &bctxt);
+        debug_assert!(foldings.iter().all(|stmt| match stmt { vir::Stmt::Fold(..) => true, _ => false }));
+        foldings.iter().for_each(|fold| bctxt.apply_stmt(fold));
+        stmts.extend(foldings);
 
         // 5. Apply effect of statement on state
         info!("[step.5] replace_stmt: {}", stmt);
@@ -1110,7 +1143,8 @@ impl<'p, 'v: 'p, 'r: 'v, 'a: 'r, 'tcx: 'a> vir::CfgReplacer<BranchCtxt<'p>, Vec<
 
         // Add "fold/unfolding in" expressions in successor
         let repl_expr = |expr: &vir::Expr| -> vir::Expr {
-            self.replace_expr(expr, bctxt, AssertionsConnective::Conjunction)
+            // TODO: handle foldings
+            self.replace_expr(expr, bctxt, AssertionsConnective::Conjunction).0
         };
 
         let new_succ = match succ {
@@ -1195,7 +1229,10 @@ struct ExprReplacer<'b, 'a: 'b> {
     bctxt_at_label: &'b HashMap<String, BranchCtxt<'a>>,
     lhs_bctxt: Option<BranchCtxt<'a>>,
     wait_old_expr: bool,
+    // TODO: explain
     accumulated_assertions: HashSet<vir::Expr>,
+    // TODO: explain
+    foldings: Vec<vir::Stmt>,
 }
 
 // TODO: explain
@@ -1217,10 +1254,11 @@ impl<'b, 'a: 'b> ExprReplacer<'b, 'a> {
             lhs_bctxt: None,
             wait_old_expr,
             accumulated_assertions: HashSet::new(),
+            foldings: vec![],
         }
     }
 
-    pub fn replace(mut self, expr: vir::Expr, assertions_connective: AssertionsConnective) -> vir::Expr {
+    pub fn replace(mut self, expr: vir::Expr, assertions_connective: AssertionsConnective) -> (vir::Expr, Vec<vir::Stmt>) {
         info!("[enter] replace {}", expr);
         let rewritten = self.fold(expr);
         match assertions_connective {
@@ -1234,7 +1272,7 @@ impl<'b, 'a: 'b> ExprReplacer<'b, 'a> {
                         .join(", ")
                 );
                 if self.accumulated_assertions.is_empty() {
-                    rewritten
+                    (rewritten, self.foldings)
                 } else {
                     let assertions = self.accumulated_assertions.into_iter().conjoin();
                     // Assertions may need to be rewritten themselves e.g. by adding "unfolding in"
@@ -1249,10 +1287,13 @@ impl<'b, 'a: 'b> ExprReplacer<'b, 'a> {
                         expr_replacer_assertion.accumulated_assertions.is_empty(),
                         "Assertions generated themselves assertions"
                     );
-                    vir::Expr::and(assertions, rewritten)
+                    let mut foldings = self.foldings;
+                    foldings.extend(expr_replacer_assertion.foldings);
+
+                    (vir::Expr::and(assertions, rewritten), foldings)
                 }
             }
-            AssertionsConnective::Drop => rewritten,
+            AssertionsConnective::Drop => (rewritten, self.foldings),
         }
     }
 }
@@ -1511,9 +1552,13 @@ impl<'b, 'a: 'b> ExprFolder for ExprReplacer<'b, 'a> {
                 .into_iter()
                 .rev()
                 .filter(|a| match a {
+                    // Not pretty at all
                     Action::Assertion(assertion) => {
-                        // Not pretty at all
                         self.accumulated_assertions.insert(assertion.clone());
+                        false
+                    }
+                    fold@Action::Fold(..) => {
+                        self.foldings.push(fold.to_stmt());
                         false
                     }
                     _ => true
@@ -1562,6 +1607,10 @@ impl<'b, 'a: 'b> ExprFolder for ExprReplacer<'b, 'a> {
                 .filter(|a| match a {
                     Action::Assertion(assertion) => {
                         self.accumulated_assertions.insert(assertion.clone());
+                        false
+                    }
+                    fold@Action::Fold(..) => {
+                        self.foldings.push(fold.to_stmt());
                         false
                     }
                     _ => true

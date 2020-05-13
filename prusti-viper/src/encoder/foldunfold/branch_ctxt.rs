@@ -63,7 +63,7 @@ impl<'a> BranchCtxt<'a> {
         // See Action comments on `TemporaryUnfold` for an explanation
         temporary_unfold: bool,
     ) -> Action {
-        debug!("We want to unfold {} with {}", pred_place, perm_amount);
+        info!("We want to unfold {} with {}", pred_place, perm_amount);
         //assert!(self.state.contains_acc(pred_place), "missing acc({}) in {}", pred_place, self.state);
         assert!(
             self.state.contains_pred(pred_place),
@@ -98,7 +98,7 @@ impl<'a> BranchCtxt<'a> {
         self.state.remove_pred(&pred_place, perm_amount);
         self.state.insert_all_perms(places_in_pred.into_iter());
 
-        debug!("We unfolded {}", pred_place);
+        info!("We unfolded {}", pred_place);
 
         trace!(
             "Acc state after unfold: {{\n{}\n}}",
@@ -725,7 +725,7 @@ impl<'a> BranchCtxt<'a> {
                     .cloned();
                 if let Some(existing_pred_to_unfold) = existing_prefix_pred_opt {
                     let perm_amount = self.state.pred()[&existing_pred_to_unfold];
-                    debug!(
+                    info!(
                         "We want to unfold {} with permission {} (we need at least {})",
                         existing_pred_to_unfold,
                         perm_amount,
@@ -735,12 +735,12 @@ impl<'a> BranchCtxt<'a> {
                     let variant = self.find_variant(&existing_pred_to_unfold, req.get_place());
                     let action = self.unfold(&existing_pred_to_unfold, perm_amount, variant, false);
                     actions.push(action);
-                    debug!("We unfolded {}", existing_pred_to_unfold);
+                    info!("We unfolded {}", existing_pred_to_unfold);
 
                     // Check if we are done
                     let new_actions = self.do_obtain(req, false).or_else(|_| ObtainResult::Failure(req.clone()))?;
                     actions.extend(new_actions);
-                    trace!("[exit] do_obtain");
+                    info!("[exit] do_obtain");
                     return ObtainResult::Success(actions);
                 }
             }
@@ -813,7 +813,7 @@ impl<'a> BranchCtxt<'a> {
         // 4. Obtain with a fold
         if req.is_pred() {
             // We want to fold `req`
-            debug!("We want to fold {}", req);
+            info!("We want to fold {}", req);
             let predicate_name = req.typed_ref_name().unwrap();
             let predicate = self.predicates.get(&predicate_name).unwrap();
 
@@ -917,7 +917,7 @@ impl<'a> BranchCtxt<'a> {
                     })
                     .min()
                     .unwrap_or(PermAmount::Write);
-                debug!(
+                info!(
                     "We want to fold {} with permission {} (we need at least {})",
                     req,
                     perm_amount,
@@ -973,11 +973,11 @@ impl<'a> BranchCtxt<'a> {
                 self.state.insert_pred(req.get_place().clone(), perm_amount);
 
                 // Done. Continue checking the remaining requirements
-                debug!("We folded {}", req);
-                trace!("[exit] obtain");
+                info!("We folded {}", req);
+                info!("[exit] obtain");
                 return ObtainResult::Success(actions);
             } else {
-                debug!(
+                info!(
                     r"It is not possible to obtain {} ({:?}).
 Access permissions: {{
 {}
@@ -1014,7 +1014,7 @@ Quantified: {{
                 ObtainResult::Failure(req.clone())
             }
             ObtainResult::Failure(_) => {
-                debug!(
+                info!(
                     r"There is no access permission to obtain {} ({:?}).
 Access permissions: {{
 {}

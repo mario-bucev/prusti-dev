@@ -14,18 +14,18 @@ use encoder::vir::StmtFolder;
 impl vir::Stmt {
     pub fn map_expr<F>(self, substitutor: F) -> Self
     where
-        F: Fn(vir::Expr) -> vir::Expr,
+        F: FnMut(vir::Expr) -> vir::Expr,
     {
         trace!("Stmt::map_expr {}", self);
         struct StmtExprSubstitutor<T>
         where
-            T: Fn(vir::Expr) -> vir::Expr,
+            T: FnMut(vir::Expr) -> vir::Expr,
         {
             substitutor: T,
         }
         impl<T> vir::StmtFolder for StmtExprSubstitutor<T>
         where
-            T: Fn(vir::Expr) -> vir::Expr,
+            T: FnMut(vir::Expr) -> vir::Expr,
         {
             fn fold_expr(&mut self, e: vir::Expr) -> vir::Expr {
                 (self.substitutor)(e)

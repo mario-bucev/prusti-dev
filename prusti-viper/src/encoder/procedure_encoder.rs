@@ -4164,7 +4164,18 @@ impl<'p, 'v: 'p, 'r: 'v, 'a: 'r, 'tcx: 'a> ProcedureEncoder<'p, 'v, 'r, 'a, 'tcx
         info!("[enter] encode_assign_repeat(lhs={}, rhs=[{:?}; {}])", encoded_lhs, operand, len);
         // FIXME: This will cause a panic for struct/adt operand
         //  They require a different encoding
-        let encoded_operand = self.mir_encoder.encode_operand_expr(operand);
+        // Almost like self.mir_encoder.encode_operand_expr,
+        // but we don't want to project the field, because we want a ref.
+        let encoded_operand = match operand {
+            &mir::Operand::Constant(box mir::Constant {
+                literal: mir::Literal::Value { value },
+                ..
+            }) => self.encoder.encode_const_expr(value),
+            &mir::Operand::Copy(ref place) | &mir::Operand::Move(ref place) =>
+                self.mir_encoder.encode_place(place).0,
+            ref x => unimplemented!("{:?}", x)
+        };
+        info!("encode_assign_repeat: encoded_operand={}", encoded_operand);
         self.encode_assign_seq(encoded_lhs, seq_ty, location, |_| encoded_operand)
     }
 
