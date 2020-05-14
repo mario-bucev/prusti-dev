@@ -131,6 +131,7 @@ impl<'a> BranchCtxt<'a> {
     }
 
     /// Like `unfold` but deals with quantified predicate access.
+    /// This will translate into an 'unfolding in'. See `Action::QuantifiedUnfold` for an example.
     fn unfold_quantified(
         &mut self,
         quant_pred: &vir::QuantifiedResourceAccess,
@@ -686,7 +687,6 @@ impl<'a> BranchCtxt<'a> {
                     matched_quant
                 );
                 actions.push(
-                    // TODO: The assertion gets incorrectly thrown away when we do action.to_expr(), which we always do in "unfolding in" expressions
                     Action::Assertion(
                         vir::Expr::forall(
                             // We use the matched quant vars, and rename the request vars accordingly
@@ -780,7 +780,6 @@ impl<'a> BranchCtxt<'a> {
                             );
                             // TODO: perform renaming
                             actions.push(
-                                // TODO: The assertion gets incorrectly thrown away when we do action.to_expr(), which we always do in "unfolding in" expressions
                                 Action::Assertion(
                                     vir::Expr::forall(
                                         // We use existing_quant_pred_to_unfold vars,
@@ -976,29 +975,8 @@ impl<'a> BranchCtxt<'a> {
                 info!("We folded {}", req);
                 info!("[exit] obtain");
                 return ObtainResult::Success(actions);
-            } else {
-                info!(
-                    r"It is not possible to obtain {} ({:?}).
-Access permissions: {{
-{}
-}}
-
-Predicates: {{
-{}
-}}
-
-Quantified: {{
-{}
-}}
-",
-                    req,
-                    req,
-                    self.state.display_acc(),
-                    self.state.display_pred(),
-                    self.state.display_quant(),
-                );
-                return ObtainResult::Failure(req.clone());
             }
+            // else: cannot fold, so we fallthrough.
         }
 
         // 5. Obtain from a quantified resource
