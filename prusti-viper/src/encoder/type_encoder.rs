@@ -352,7 +352,23 @@ impl<'p, 'v, 'r: 'v, 'a: 'r, 'tcx: 'a> TypeEncoder<'p, 'v, 'r, 'a, 'tcx> {
 
             ty::TypeVariants::TyArray(inner, _) | ty::TypeVariants::TySlice(inner) => {
                 let size = if let ty::TypeVariants::TyArray(_, size) = self.ty.sty {
-                    size.assert_usize(self.encoder.env().tcx())
+                    Some(match size.val {
+                        ConstVal::Value(ref value) => value.to_scalar().unwrap(),
+                        ConstVal::Unevaluated(def_id, _param_env) => {
+                            // Found here:
+                            // https://rustc-dev-guide.rust-lang.org/miri.html#miri
+                            let gid = mir::interpret::GlobalId {
+                                promoted: None,
+                                instance: ty::Instance::mono(self.encoder.env().tcx(), def_id),
+                            };
+                            self.encoder.env().tcx()
+                                .const_eval(self.encoder.env().tcx().param_env(def_id).and(gid))
+                                .unwrap().to_scalar().unwrap()
+                        }
+                    }.to_bits(ty::layout::Size::from_bits(64))
+                        .ok()
+                        .unwrap() as u64
+                    )
                 } else {
                     None
                 };
